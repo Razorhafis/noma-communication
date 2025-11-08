@@ -1,0 +1,313 @@
+clear all;
+close all;
+
+%% Simple Two-Hop NOMA System
+% Hop 1: Ground Station (GS) -> UAV (using NOMA)
+% Hop 2: UAV -> Users (using NOMA)
+
+fprintf('===== SIMPLE TWO-HOP NOMA SYSTEM =====\n\n');
+
+%% System Parameters
+num_users = 4;  % Total users (1 UAV + 3 far users)
+num_symbols = 1000;
+bits_per_symbol = 2; % QPSK
+total_bits = num_symbols * bits_per_symbol;
+
+% Power and Noise
+P_ground = 10;      % GS transmit power (W)
+P_uav = 10;         % UAV transmit power (W)
+noise_power = 1e-10;
+
+% Area parameters
+area_size = 1000;   % 1000m x 1000m area
+gs_position = [0, 0];
+uav_altitude = 100; % UAV height (m)
+
+% Path loss parameters
+alpha_air = 2.0;    % Air-to-air path loss exponent
+alpha_ground = 3.5; % Air-to-ground path loss exponent
+d_ref = 1;          % Reference distance (m)
+
+fprintf('Number of Users: %d (1 UAV + %d far users)\n', num_users, num_users-1);
+fprintf('GS Power: %.1f W\n', P_ground);
+fprintf('UAV Power: %.1f W\n', P_uav);
+fprintf('Noise Power: %.2e W\n\n', noise_power);
+
+%% User Positions
+user_positions = zeros(num_users, 3);
+user_positions(1, :) = [0, 0, uav_altitude]; % UAV directly above GS
+
+% Far users randomly placed on ground
+for i = 2:num_users
+    user_positions(i, :) = [rand*area_size, rand*area_size, 0];
+end
+
+fprintf('=== USER POSITIONS ===\n');
+fprintf('User 1 (UAV): [%.1f, %.1f, %.1f] m\n', user_positions(1,:));
+for i = 2:num_users
+    fprintf('User %d: [%.1f, %.1f, %.1f] m\n', i, user_positions(i,:));
+end
+
+%% Distance Calculations
+fprintf('\n=== DISTANCE CALCULATIONS ===\n');
+
+% Hop 1: GS to UAV
+d_gs_uav = uav_altitude;
+fprintf('\nHop 1 (GS → UAV):\n');
+fprintf('  Distance: %.2f m\n', d_gs_uav);
+
+% Hop 2: UAV to Users
+d_uav_users = zeros(num_users-1, 1);
+fprintf('\nHop 2 (UAV → Users):\n');
+for i = 2:num_users
+    d_uav_users(i-1) = norm(user_positions(1,:) - user_positions(i,:));
+    fprintf('  UAV → User %d: %.2f m\n', i, d_uav_users(i-1));
+end
+
+%% Channel Gains (Path Loss + Rayleigh Fading)
+fprintf('\n=== CHANNEL GAINS ===\n');
+
+% Hop 1: GS to UAV (air-to-air)
+PL_gs_uav = (d_gs_uav/d_ref)^(-alpha_air);
+h_gs_uav = sqrt(PL_gs_uav/2) * (randn + 1j*randn);
+g_gs_uav = abs(h_gs_uav)^2;
+
+fprintf('\nHop 1 (GS → UAV):\n');
+fprintf('  Path Loss: %.2f dB\n', 10*log10(PL_gs_uav));
+fprintf('  Channel Gain: %.6e (%.2f dB)\n', g_gs_uav, 10*log10(g_gs_uav));
+
+% Hop 2: UAV to Users (air-to-ground)
+PL_uav_users = zeros(num_users-1, 1);
+h_uav_users = zeros(num_users-1, 1);
+g_uav_users = zeros(num_users-1, 1);
+
+fprintf('\nHop 2 (UAV → Users):\n');
+for i = 2:num_users
+    idx = i-1;
+    PL_uav_users(idx) = (d_uav_users(idx)/d_ref)^(-alpha_ground);
+    h_uav_users(idx) = sqrt(PL_uav_users(idx)/2) * (randn + 1j*randn);
+    g_uav_users(idx) = abs(h_uav_users(idx))^2;
+    
+    fprintf('  UAV → User %d:\n', i);
+    fprintf('    Path Loss: %.2f dB\n', 10*log10(PL_uav_users(idx)));
+    fprintf('    Channel Gain: %.6e (%.2f dB)\n', g_uav_users(idx), 10*log10(g_uav_users(idx)));
+end
+
+%% Power Allocation (NOMA principle: weaker users get more power)
+fprintf('\n=== POWER ALLOCATION ===\n');
+
+% Hop 1: Allocate power for all users at GS
+[~, order_hop1] = sort(g_gs_uav * ones(num_users,1), 'ascend');
+powers_hop1 = zeros(num_users, 1);
+
+fprintf('\nHop 1 Power Allocation:\n');
+for i = 1:num_users
+    user_idx = order_hop1(i);
+    % More power to weaker users
+    powers_hop1(user_idx) = P_ground * (num_users - i + 1) / sum(1:num_users);
+    fprintf('  User %d: %.4f W (%.2f dBm)\n', user_idx, powers_hop1(user_idx), 10*log10(powers_hop1(user_idx)*1000));
+end
+
+% Hop 2: Allocate power for far users at UAV
+[~, order_hop2] = sort(g_uav_users, 'ascend');
+powers_hop2 = zeros(num_users-1, 1);
+
+fprintf('\nHop 2 Power Allocation:\n');
+for i = 1:num_users-1
+    user_idx = order_hop2(i);
+    powers_hop2(user_idx) = P_uav * (num_users - i) / sum(1:(num_users-1));
+    fprintf('  User %d: %.4f W (%.2f dBm)\n', user_idx+1, powers_hop2(user_idx), 10*log10(powers_hop2(user_idx)*1000));
+end
+
+%% Generate Data
+user_bits = cell(num_users, 1);
+user_symbols = cell(num_users, 1);
+qpsk_map = [1+1j, 1-1j, -1+1j, -1-1j] / sqrt(2);
+
+for i = 1:num_users
+    user_bits{i} = randi([0 1], total_bits, 1);
+    bits_matrix = reshape(user_bits{i}, 2, num_symbols)';
+    user_symbols{i} = qpsk_map(bits_matrix(:,1)*2 + bits_matrix(:,2) + 1)';
+end
+
+%% HOP 1: GS transmits to UAV using NOMA
+fprintf('\n=== HOP 1 TRANSMISSION (GS → UAV) ===\n');
+
+% Superposition coding at GS
+tx_signal_gs = zeros(num_symbols, 1);
+for i = 1:num_users
+    tx_signal_gs = tx_signal_gs + sqrt(powers_hop1(i)) * user_symbols{i};
+end
+
+% UAV receives
+rx_uav = tx_signal_gs * h_gs_uav + sqrt(noise_power/2)*(randn(num_symbols,1) + 1j*randn(num_symbols,1));
+
+% UAV performs SIC to decode its own data (User 1)
+fprintf('\nUAV performing SIC to decode its data...\n');
+
+decoded_symbols = cell(num_users, 1);
+current_signal = rx_uav;
+
+% SIC order: decode strong users first, cancel, then decode weaker
+[~, sic_order] = sort(powers_hop1, 'descend');
+
+for k = 1:num_users
+    user_idx = sic_order(k);
+    
+    % Hard decision QPSK decoding
+    decoded_symbols{user_idx} = sign(real(current_signal)) + 1j*sign(imag(current_signal));
+    decoded_symbols{user_idx} = decoded_symbols{user_idx} / sqrt(2);
+    
+    if user_idx == 1
+        fprintf('  Decoded User 1 (UAV) data\n');
+        break; % UAV only needs its own data
+    else
+        % Cancel this user's signal
+        current_signal = current_signal - sqrt(powers_hop1(user_idx)) * decoded_symbols{user_idx} * h_gs_uav;
+        fprintf('  Decoded and cancelled User %d\n', user_idx);
+    end
+end
+
+% Calculate UAV BER
+bits_decoded_uav = zeros(total_bits, 1);
+temp = decoded_symbols{1} * sqrt(2);
+bits_decoded_uav(1:2:end) = real(temp) < 0;
+bits_decoded_uav(2:2:end) = imag(temp) < 0;
+ber_uav = sum(bits_decoded_uav ~= user_bits{1}) / total_bits;
+
+fprintf('  UAV BER: %.6f\n', ber_uav);
+
+%% HOP 2: UAV forwards data to far users using NOMA
+fprintf('\n=== HOP 2 TRANSMISSION (UAV → Users) ===\n');
+
+% UAV transmits superposed signal for far users
+tx_signal_uav = zeros(num_symbols, 1);
+for i = 1:num_users-1
+    tx_signal_uav = tx_signal_uav + sqrt(powers_hop2(i)) * user_symbols{i+1};
+end
+
+% Each far user receives and decodes
+user_results = zeros(num_users-1, 5); % [user_id, ber, sinr_db, channel_gain_db, distance]
+
+fprintf('\nFar users performing SIC...\n');
+
+for target_user = 2:num_users
+    target_idx = target_user - 1;
+    
+    % Receive signal
+    rx_user = tx_signal_uav * h_uav_users(target_idx) + ...
+              sqrt(noise_power/2)*(randn(num_symbols,1) + 1j*randn(num_symbols,1));
+    
+    % SIC decoding
+    current_signal = rx_user;
+    [~, sic_order_hop2] = sort(powers_hop2, 'descend');
+    
+    for k = 1:num_users-1
+        user_idx = sic_order_hop2(k);
+        
+        % Hard decision decoding
+        decoded = sign(real(current_signal)) + 1j*sign(imag(current_signal));
+        decoded = decoded / sqrt(2);
+        
+        if user_idx == target_idx
+            % This is our target user
+            decoded_symbols{target_user} = decoded;
+            
+            % Calculate SINR
+            signal_power = powers_hop2(target_idx) * g_uav_users(target_idx);
+            interference_power = 0;
+            for j = 1:num_users-1
+                if j ~= target_idx && powers_hop2(j) < powers_hop2(target_idx)
+                    interference_power = interference_power + powers_hop2(j) * g_uav_users(target_idx);
+                end
+            end
+            sinr = signal_power / (interference_power + noise_power);
+            
+            % Calculate BER
+            temp = decoded * sqrt(2);
+            bits_decoded = zeros(total_bits, 1);
+            bits_decoded(1:2:end) = real(temp) < 0;
+            bits_decoded(2:2:end) = imag(temp) < 0;
+            ber = sum(bits_decoded ~= user_bits{target_user}) / total_bits;
+            
+            user_results(target_idx, :) = [target_user, ber, 10*log10(sinr), ...
+                                           10*log10(g_uav_users(target_idx)), d_uav_users(target_idx)];
+            
+            fprintf('  User %d: BER = %.6f, SINR = %.2f dB\n', target_user, ber, 10*log10(sinr));
+            break;
+        else
+            % Cancel this user's signal
+            current_signal = current_signal - sqrt(powers_hop2(user_idx)) * decoded * h_uav_users(target_idx);
+        end
+    end
+end
+
+%% Secrecy Rate Calculation (Simple Model)
+fprintf('\n=== SECRECY RATE CALCULATION ===\n');
+fprintf('Assuming eavesdropper at distance = 1.5 × max user distance\n\n');
+
+% Eavesdropper position (farther than all legitimate users)
+d_eaves = 1.5 * max(d_uav_users);
+PL_eaves = (d_eaves/d_ref)^(-alpha_ground);
+h_eaves = sqrt(PL_eaves/2) * (randn + 1j*randn);
+g_eaves = abs(h_eaves)^2;
+
+fprintf('Eavesdropper distance: %.2f m\n', d_eaves);
+fprintf('Eavesdropper channel gain: %.6e (%.2f dB)\n\n', g_eaves, 10*log10(g_eaves));
+
+secrecy_rates = zeros(num_users-1, 1);
+
+for i = 1:num_users-1
+    user_id = i + 1;
+    
+    % Legitimate user rate
+    signal_power_legit = powers_hop2(i) * g_uav_users(i);
+    interference_legit = 0;
+    for j = 1:num_users-1
+        if j ~= i && powers_hop2(j) < powers_hop2(i)
+            interference_legit = interference_legit + powers_hop2(j) * g_uav_users(i);
+        end
+    end
+    sinr_legit = signal_power_legit / (interference_legit + noise_power);
+    rate_legit = log2(1 + sinr_legit);
+    
+    % Eavesdropper rate
+    signal_power_eaves = powers_hop2(i) * g_eaves;
+    interference_eaves = 0;
+    for j = 1:num_users-1
+        if j ~= i
+            interference_eaves = interference_eaves + powers_hop2(j) * g_eaves;
+        end
+    end
+    sinr_eaves = signal_power_eaves / (interference_eaves + noise_power);
+    rate_eaves = log2(1 + sinr_eaves);
+    
+    secrecy_rates(i) = max(0, rate_legit - rate_eaves);
+    
+    fprintf('User %d:\n', user_id);
+    fprintf('  Legitimate Rate: %.4f bits/s/Hz\n', rate_legit);
+    fprintf('  Eavesdropper Rate: %.4f bits/s/Hz\n', rate_eaves);
+    fprintf('  Secrecy Rate: %.4f bits/s/Hz\n\n', secrecy_rates(i));
+end
+
+%% Final Summary
+fprintf('=== FINAL SUMMARY ===\n\n');
+fprintf('%-8s | %-10s | %-12s | %-12s | %-12s | %-12s\n', ...
+    'User', 'BER', 'SINR (dB)', 'Gain (dB)', 'Distance(m)', 'Secrecy(bps/Hz)');
+fprintf('---------|------------|--------------|--------------|--------------|---------------\n');
+
+fprintf('%-8d | %.8f | %-12s | %.4f       | %-12.2f | %-12s\n', ...
+    1, ber_uav, 'N/A', 10*log10(g_gs_uav), d_gs_uav, 'N/A');
+
+for i = 1:num_users-1
+    fprintf('%-8d | %.8f | %.4f       | %.4f       | %-12.2f | %.4f\n', ...
+        user_results(i,1), user_results(i,2), user_results(i,3), ...
+        user_results(i,4), user_results(i,5), secrecy_rates(i));
+end
+
+fprintf('\n=== AVERAGE METRICS ===\n');
+fprintf('Average BER (Far Users): %.6f\n', mean(user_results(:,2)));
+fprintf('Average SINR (Far Users): %.2f dB\n', mean(user_results(:,3)));
+fprintf('Average Secrecy Rate: %.4f bits/s/Hz\n', mean(secrecy_rates));
+fprintf('Min Secrecy Rate: %.4f bits/s/Hz\n', min(secrecy_rates));
+fprintf('Max Secrecy Rate: %.4f bits/s/Hz\n', max(secrecy_rates));
