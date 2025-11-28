@@ -1,14 +1,18 @@
-clear all;
-close all;
+%% TWO-HOP NOMA (fixed) - full script
+% Key fixes:
+% - All symbol vectors are column vectors
+% - Equalize by complex channel before hard decision
+% - SIC cancellation uses sqrt(P) * h * s_hat (element-wise)
+% - Safe length checks for BER comparisons
+% - Consistent normalized QPSK mapping (/sqrt(2))
+
+clear; close all; rng('shuffle');
 
 %% Simple Two-Hop NOMA System
-% Hop 1: Ground Station (GS) -> UAV (using NOMA)
-% Hop 2: UAV -> Users (using NOMA)
-
-fprintf('===== SIMPLE TWO-HOP NOMA SYSTEM =====\n\n');
+fprintf('===== SIMPLE TWO-HOP NOMA SYSTEM (fixed) =====\n\n');
 
 %% System Parameters
-num_users = 4;  % Total users (1 UAV + 3 far users)
+num_users = 9;  % Total users (1 UAV + 3 far users)
 num_symbols = 1000;
 bits_per_symbol = 2; % QPSK
 total_bits = num_symbols * bits_per_symbol;
@@ -96,8 +100,9 @@ end
 %% Power Allocation (NOMA principle: weaker users get more power)
 fprintf('\n=== POWER ALLOCATION ===\n');
 
-% Hop 1: Allocate power for all users at GS
-[~, order_hop1] = sort(g_gs_uav * ones(num_users,1), 'ascend');
+% Hop 1: Allocate power for all users at GS (use UAV channel repeated for vector)
+g_vec_hop1 = g_gs_uav * ones(num_users,1);
+[~, order_hop1] = sort(g_vec_hop1, 'ascend');
 powers_hop1 = zeros(num_users, 1);
 
 fprintf('\nHop 1 Power Allocation:\n');
@@ -119,15 +124,17 @@ for i = 1:num_users-1
     fprintf('  User %d: %.4f W (%.2f dBm)\n', user_idx+1, powers_hop2(user_idx), 10*log10(powers_hop2(user_idx)*1000));
 end
 
-%% Generate Data
+%% Generate Data (ensure column vectors)
 user_bits = cell(num_users, 1);
 user_symbols = cell(num_users, 1);
-qpsk_map = [1+1j, 1-1j, -1+1j, -1-1j] / sqrt(2);
+qpsk_map = [1+1j, 1-1j, -1+1j, -1-1j] / sqrt(2); % normalized QPSK
 
 for i = 1:num_users
     user_bits{i} = randi([0 1], total_bits, 1);
-    bits_matrix = reshape(user_bits{i}, 2, num_symbols)';
-    user_symbols{i} = qpsk_map(bits_matrix(:,1)*2 + bits_matrix(:,2) + 1)';
+    bits_matrix = reshape(user_bits{i}, 2, num_symbols)'; % num_symbols x 2
+    idx = bits_matrix(:,1)*2 + bits_matrix(:,2) + 1;      % 1..4
+    s = qpsk_map(idx);                                    % column vector num_symbols x 1
+    user_symbols{i} = s(:); % ensure column
 end
 
 %% HOP 1: GS transmits to UAV using NOMA
@@ -142,40 +149,45 @@ end
 % UAV receives
 rx_uav = tx_signal_gs * h_gs_uav + sqrt(noise_power/2)*(randn(num_symbols,1) + 1j*randn(num_symbols,1));
 
-% UAV performs SIC to decode its own data (User 1)
+% 8. UAV DECODES ITS OWN DATA (SIC)
 fprintf('\nUAV performing SIC to decode its data...\n');
 
-decoded_symbols = cell(num_users, 1);
+decoded_symbols_hop1 = cell(num_users,1);
 current_signal = rx_uav;
 
-% SIC order: decode strong users first, cancel, then decode weaker
-[~, sic_order] = sort(powers_hop1, 'descend');
+% Compute received power per layer at UAV and set decode order (descending = strongest first)
+recv_power_hop1 = powers_hop1 .* (abs(h_gs_uav)^2);
+[~, sic_order] = sort(recv_power_hop1, 'descend');  % typical: strongest layer decoded first
 
 for k = 1:num_users
     user_idx = sic_order(k);
+    % Equalize before decision (divide by complex channel)
+    rx_eq = current_signal ./ h_gs_uav;  % elementwise (num_symbols x 1)
+    sym_hat = (sign(real(rx_eq)) + 1j*sign(imag(rx_eq))) / sqrt(2); % normalized QPSK hard decision
+    sym_hat = sym_hat(:); % force column
     
-    % Hard decision QPSK decoding
-    decoded_symbols{user_idx} = sign(real(current_signal)) + 1j*sign(imag(current_signal));
-    decoded_symbols{user_idx} = decoded_symbols{user_idx} / sqrt(2);
+    decoded_symbols_hop1{user_idx} = sym_hat; % store as column
     
     if user_idx == 1
-        fprintf('  Decoded User 1 (UAV) data\n');
+        fprintf('  Decoded UAV (User 1) data\n');
         break; % UAV only needs its own data
     else
-        % Cancel this user's signal
-        current_signal = current_signal - sqrt(powers_hop1(user_idx)) * decoded_symbols{user_idx} * h_gs_uav;
-        fprintf('  Decoded and cancelled User %d\n', user_idx);
+        % Cancel this user's contribution using complex channel
+        current_signal = current_signal - sqrt(powers_hop1(user_idx)) * (h_gs_uav .* sym_hat);
+        fprintf('  Decoded and cancelled User %d at UAV\n', user_idx);
     end
 end
 
-% Calculate UAV BER
-bits_decoded_uav = zeros(total_bits, 1);
-temp = decoded_symbols{1} * sqrt(2);
-bits_decoded_uav(1:2:end) = real(temp) < 0;
-bits_decoded_uav(2:2:end) = imag(temp) < 0;
-ber_uav = sum(bits_decoded_uav ~= user_bits{1}) / total_bits;
-
-fprintf('  UAV BER: %.6f\n', ber_uav);
+% Calculate UAV BER (demap using same mapping)
+sym_uav = decoded_symbols_hop1{1}; % should be num_symbols x 1
+bits_demod = zeros(num_symbols,2);
+bits_demod(:,1) = real(sym_uav) < 0;
+bits_demod(:,2) = imag(sym_uav) < 0;
+uav_decoded_bits = reshape(bits_demod.', [], 1);
+len_min = min(length(uav_decoded_bits), length(user_bits{1}));
+uav_errors = sum(uav_decoded_bits(1:len_min) ~= user_bits{1}(1:len_min));
+ber_uav = uav_errors / len_min;
+fprintf('  UAV BER: %.6f (errors=%d / bits=%d)\n', ber_uav, uav_errors, len_min);
 
 %% HOP 2: UAV forwards data to far users using NOMA
 fprintf('\n=== HOP 2 TRANSMISSION (UAV → Users) ===\n');
@@ -192,52 +204,50 @@ user_results = zeros(num_users-1, 5); % [user_id, ber, sinr_db, channel_gain_db,
 fprintf('\nFar users performing SIC...\n');
 
 for target_user = 2:num_users
-    target_idx = target_user - 1;
-    
-    % Receive signal
-    rx_user = tx_signal_uav * h_uav_users(target_idx) + ...
+    target_idx = target_user - 1; % position in hop2 arrays
+    rx_user = tx_signal_uav .* h_uav_users(target_idx) + ...
               sqrt(noise_power/2)*(randn(num_symbols,1) + 1j*randn(num_symbols,1));
     
-    % SIC decoding
-    current_signal = rx_user;
-    [~, sic_order_hop2] = sort(powers_hop2, 'descend');
+    % SIC decoding: determine decode order by received power at this user
+    recv_power_hop2 = powers_hop2 .* (abs(h_uav_users(target_idx))^2);
+    [~, sic_order_hop2] = sort(recv_power_hop2, 'descend'); % strongest-first
     
-    for k = 1:num_users-1
-        user_idx = sic_order_hop2(k);
-        
-        % Hard decision decoding
-        decoded = sign(real(current_signal)) + 1j*sign(imag(current_signal));
-        decoded = decoded / sqrt(2);
+    current_signal2 = rx_user;
+    decoded_symbol_this = zeros(num_symbols,1);
+    
+    for k = 1:(num_users-1)
+        user_idx = sic_order_hop2(k);  % layer index 1..(num_users-1)
+        % equalize by complex channel
+        rx_eq2 = current_signal2 ./ h_uav_users(target_idx);
+        sym_hat2 = (sign(real(rx_eq2)) + 1j*sign(imag(rx_eq2))) / sqrt(2);
+        sym_hat2 = sym_hat2(:);
         
         if user_idx == target_idx
-            % This is our target user
-            decoded_symbols{target_user} = decoded;
-            
-            % Calculate SINR
-            signal_power = powers_hop2(target_idx) * g_uav_users(target_idx);
+            % this is the desired user; compute SINR and BER
+            decoded_symbol_this = sym_hat2;
+            % compute SINR (linear)
+            signal_power = powers_hop2(target_idx) * abs(h_uav_users(target_idx))^2;
             interference_power = 0;
-            for j = 1:num_users-1
+            for j = 1:(num_users-1)
                 if j ~= target_idx && powers_hop2(j) < powers_hop2(target_idx)
-                    interference_power = interference_power + powers_hop2(j) * g_uav_users(target_idx);
+                    interference_power = interference_power + powers_hop2(j) * abs(h_uav_users(target_idx))^2;
                 end
             end
             sinr = signal_power / (interference_power + noise_power);
-            
-            % Calculate BER
-            temp = decoded * sqrt(2);
-            bits_decoded = zeros(total_bits, 1);
-            bits_decoded(1:2:end) = real(temp) < 0;
-            bits_decoded(2:2:end) = imag(temp) < 0;
-            ber = sum(bits_decoded ~= user_bits{target_user}) / total_bits;
-            
-            user_results(target_idx, :) = [target_user, ber, 10*log10(sinr), ...
-                                           10*log10(g_uav_users(target_idx)), d_uav_users(target_idx)];
-            
+            % BER via demapping
+            bits_demod2 = zeros(num_symbols,2);
+            bits_demod2(:,1) = real(decoded_symbol_this) < 0;
+            bits_demod2(:,2) = imag(decoded_symbol_this) < 0;
+            decoded_bits2 = reshape(bits_demod2.', [], 1);
+            len_min2 = min(length(decoded_bits2), length(user_bits{target_user}));
+            errors2 = sum(decoded_bits2(1:len_min2) ~= user_bits{target_user}(1:len_min2));
+            ber = errors2 / len_min2;
+            user_results(target_idx, :) = [target_user, ber, 10*log10(sinr), 10*log10(g_uav_users(target_idx)), d_uav_users(target_idx)];
             fprintf('  User %d: BER = %.6f, SINR = %.2f dB\n', target_user, ber, 10*log10(sinr));
             break;
         else
-            % Cancel this user's signal
-            current_signal = current_signal - sqrt(powers_hop2(user_idx)) * decoded * h_uav_users(target_idx);
+            % Cancel this layer (use estimated symbol and the user's channel)
+            current_signal2 = current_signal2 - sqrt(powers_hop2(user_idx)) * (h_uav_users(target_idx) .* sym_hat2);
         end
     end
 end
